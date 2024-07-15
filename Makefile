@@ -1,18 +1,17 @@
-CC = gcc
 srcFolder = ./src/
 objFolder = ./build/
-srcFiles = $(wildcard $(srcFolder)*.c)
-objects = $(patsubst $(srcFolder)%.c, $(objFolder)%.o, $(srcFiles))
-cflags = -Wall -g -lssl -lcrypto -O3 `pkg-config fuse --cflags --libs`
+srcFiles = $(wildcard $(srcFolder)*.cpp)
+objects = $(patsubst $(srcFolder)%.cpp, $(objFolder)%.o, $(srcFiles))
+cflags = -Wall -g -lssl -lcrypto -O3 `pkg-config fuse --cflags --libs` -DDEBUG
 
 all: CDCFS
 
-$(objFolder)%.o: $(srcFolder)%.c
+$(objFolder)%.o: $(srcFolder)%.cpp
 	@mkdir -p $(objFolder)
-	$(CC) $(cflags) -c -o $@ $<
+	$(CXX) $(cflags) -c -o $@ $<
 
 CDCFS: $(objects)
-	$(CC) $(cflags) -o $@ $^
+	$(CXX) $(cflags) -o $@ $^
 
 clean:
 	rm -f CDCFS $(objFolder)*.o

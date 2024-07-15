@@ -66,7 +66,7 @@ static int cdcfs_read(const char *path, char *buf, size_t size, off_t offset,
     snprintf(full_path, sizeof(full_path), "%s%s", backend, path);
     DEBUG_MESSAGE("read: %s offset:%ld size:%ld\n", full_path, offset, size);
 
-    if (fi->fh == -1) {
+    if (fi->fh == (long unsigned int)-1) {
         return -errno;
     }
 
@@ -96,7 +96,7 @@ static int cdcfs_write(const char *path, const char *buf, size_t size, off_t off
     char full_path[1024];
     snprintf(full_path, sizeof(full_path), "%s%s", backend, path);
     DEBUG_MESSAGE("write: %s offset:%ld size:%ld\n", full_path, offset, size);
-    if (fi->fh == -1) {
+    if (fi->fh == (long unsigned int)-1) {
         return -errno;
     }
     res = pwrite(fi->fh, buf, size, offset);
