@@ -5,9 +5,12 @@
 
 static struct fuse_operations cdcfs_oper = {
     .getattr        = cdcfs_getattr,
+    .readlink       = cdcfs_readlink,
     .mkdir          = cdcfs_mkdir,
     .unlink         = cdcfs_unlink,
     .rmdir          = cdcfs_rmdir,
+    .symlink        = cdcfs_symlink,
+    .link           = cdcfs_link,
     .truncate       = cdcfs_truncate,
     .utime          = cdcfs_utime,
     .open           = cdcfs_open,
@@ -18,6 +21,7 @@ static struct fuse_operations cdcfs_oper = {
     .readdir        = cdcfs_readdir,
     .releasedir     = cdcfs_releasedir,
     .create         = cdcfs_create,
+    .ftruncate      = cdcfs_ftruncate,
 };
 
 int main(int argc, char *argv[]) {

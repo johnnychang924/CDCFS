@@ -8,8 +8,8 @@
 
 static int cdcfs_opendir(const char *path, struct fuse_file_info *fi) {
     char full_path[1024];
-    snprintf(full_path, sizeof(full_path), "%s%s", backend, path);
-    DEBUG_MESSAGE("open dir: %s\n", full_path);
+    snprintf(full_path, sizeof(full_path), "%s%s", BACKEND, path);
+    DEBUG_MESSAGE("open dir: " << path);
 
     DIR *dp = opendir(full_path);
     if (dp == NULL) {
@@ -23,10 +23,8 @@ static int cdcfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
                          off_t offset, struct fuse_file_info *fi) {
     DIR *dp;
     struct dirent *de;
-    char full_path[1024];
 
-    snprintf(full_path, sizeof(full_path), "%s%s", backend, path);
-    DEBUG_MESSAGE("read dir: %s\n", full_path);
+    DEBUG_MESSAGE("read dir: " << path);
 
     dp = (DIR *)fi->fh;
     if (dp == NULL) {
@@ -48,10 +46,8 @@ static int cdcfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 
 static int cdcfs_releasedir(const char *path, struct fuse_file_info *fi) {
     int res;
-    char full_path[1024];
 
-    snprintf(full_path, sizeof(full_path), "%s%s", backend, path);
-    DEBUG_MESSAGE("release dir: %s\n", full_path);
+    DEBUG_MESSAGE("release dir: " << path);
 
     res = closedir((DIR *) fi->fh);
     if (res == -1) {
@@ -64,8 +60,8 @@ static int cdcfs_mkdir(const char *path, mode_t mode) {
     int res;
     char full_path[1024];
 
-    snprintf(full_path, sizeof(full_path), "%s%s", backend, path);
-    DEBUG_MESSAGE("create dir: %s\n", full_path);
+    snprintf(full_path, sizeof(full_path), "%s%s", BACKEND, path);
+    DEBUG_MESSAGE("create dir: " << path);
     res = mkdir(full_path, mode);
     if (res == -1) {
         return -errno;
@@ -77,8 +73,8 @@ static int cdcfs_rmdir(const char *path) {
     int res;
     char full_path[1024];
 
-    snprintf(full_path, sizeof(full_path), "%s%s", backend, path);
-    DEBUG_MESSAGE("remove dir: %s\n", full_path);
+    snprintf(full_path, sizeof(full_path), "%s%s", BACKEND, path);
+    DEBUG_MESSAGE("remove dir: " << path);
     res = rmdir(full_path);
     if (res == -1) {
         return -errno;

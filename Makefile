@@ -2,9 +2,12 @@ srcFolder = ./src/
 objFolder = ./build/
 srcFiles = $(wildcard $(srcFolder)*.cpp)
 objects = $(patsubst $(srcFolder)%.cpp, $(objFolder)%.o, $(srcFiles))
-cflags = -Wall -g -lssl -lcrypto -O3 `pkg-config fuse --cflags --libs` -DDEBUG
+cflags = -Wall -g -lssl -lcrypto -O3 `pkg-config fuse --cflags --libs`
 
 all: CDCFS
+
+debug: cflags += -DDEBUG -g
+debug: all
 
 $(objFolder)%.o: $(srcFolder)%.cpp
 	@mkdir -p $(objFolder)
