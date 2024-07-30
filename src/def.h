@@ -3,7 +3,7 @@
 #ifndef DEF_H
 #define DEF_H
 
-#define BACKEND "/mnt/data/Desktop/CDCFS/bak"
+#define BACKEND "/mnt/data/FUSECDC/CDCFS/bak"
 #define BLOCK_SIZE 4096
 #define MAX_GROUP_SIZE 4096
 
