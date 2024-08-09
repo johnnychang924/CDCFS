@@ -11,7 +11,9 @@
 #include <algorithm>
 #include <cstring>
 #include <cmath>
+#include <mutex>
 #include "def.h"
+#include <tbb/concurrent_hash_map.h>
 
 struct group_addr{
     INUM_TYPE iNum;
@@ -24,7 +26,8 @@ struct mapping_table_entry{
     std::vector<unsigned long> group_offset;    // the start byte in file of each group
     std::vector<group_addr *> group_pos;        // The position of every Group
     std::vector<FP_TYPE> fp_list;               // fingerprint of every block
-    unsigned long actual_size_in_disk;          // current in disk block(BLOCK_SIZE) number (after dedup)
+    unsigned long logical_size_for_host = 0;    // the size host will see(real file size)
+    unsigned long actual_size_in_disk;          // current in disk size (after dedup)
 };
 
 struct buffer_entry{
@@ -35,23 +38,33 @@ struct buffer_entry{
 
 PATH_TYPE iNum_to_path[MAX_INODE_NUM];
 std::unordered_map<PATH_TYPE, INUM_TYPE> path_to_iNum;
+std::shared_mutex path_to_iNum_mutex;
+
 std::set<INUM_TYPE> free_iNum;
 INUM_TYPE iNum_top = 0;
 
 std::unordered_map<uint64_t, INUM_TYPE> get_iNum_by_fh;             // get iNum by file handler (faster than get by file path)
+std::shared_mutex get_iNum_by_fh_mutex;
+
 std::unordered_map<FP_TYPE, group_addr *> fp_store;
+std::shared_mutex fp_store_mutex;
+
 buffer_entry file_buffer[MAX_INODE_NUM];                            // buffer data util it's full
 mapping_table_entry mapping_table[MAX_INODE_NUM];
 
-// a simple write lock (I give up, maybe not important?)
-// pthread_mutex_t write_mutex = PTHREAD_MUTEX_INITIALIZER;
+unsigned long total_write_size = 0;
+unsigned long total_dedup_size = 0;
 
 inline INUM_TYPE get_inum(PATH_TYPE path_str){
+    std::shared_lock<std::shared_mutex> path_to_iNum_shared_lock(path_to_iNum_mutex);
     auto it = path_to_iNum.find(path_str);
+    path_to_iNum_shared_lock.unlock();
     if (it != path_to_iNum.end()){          // already written file, return old inode number
         return it->second;
     }
     else{                                   // new coming file, assign a new inode number
+        DEBUG_MESSAGE("allocate new iNum: " << (int)iNum_top << " for file: " << path_str);
+        std::unique_lock<std::shared_mutex> path_to_iNum_unique_lock(path_to_iNum_mutex);
         INUM_TYPE new_iNum;
         if (free_iNum.empty()){
             new_iNum = iNum_top++;
@@ -61,6 +74,7 @@ inline INUM_TYPE get_inum(PATH_TYPE path_str){
             free_iNum.erase(free_iNum.begin());
         }
         path_to_iNum[path_str] = new_iNum;
+        path_to_iNum_unique_lock.unlock();
         iNum_to_path[new_iNum] = path_str;
         return new_iNum;
     }
@@ -69,7 +83,9 @@ inline INUM_TYPE get_inum(PATH_TYPE path_str){
 inline INUM_TYPE prepare_write(const char *path, const uint64_t file_handler){
     PATH_TYPE path_str(path);
     INUM_TYPE iNum = get_inum(path_str);
+    std::unique_lock<std::shared_mutex> get_iNum_by_fh_unique_lock(get_iNum_by_fh_mutex);
     get_iNum_by_fh[file_handler] = iNum;    // cahce the iNum by file handler
+    get_iNum_by_fh_unique_lock.unlock();
     if (file_buffer[iNum].buf != NULL) 
         PRINT_WARNING("Critical error: trying to allocate file buffer when old buffer is already exist!!");
     file_buffer[iNum] = {
@@ -83,13 +99,21 @@ inline INUM_TYPE prepare_write(const char *path, const uint64_t file_handler){
 static int cdcfs_getattr(const char *path, struct stat *stbuf) {
     int res;
     char full_path[1024];
+    PATH_TYPE path_str(path);
     snprintf(full_path, sizeof(full_path), "%s%s", BACKEND, path);
-    DEBUG_MESSAGE("get attr: " << path);
+    DEBUG_MESSAGE("[getattr]" << path);
 
     res = lstat(full_path, stbuf);
     if (res == -1) {
         return -errno;
     }
+    std::shared_lock<std::shared_mutex> path_to_iNum_shared_lock(path_to_iNum_mutex);
+    auto it = path_to_iNum.find(path_str);
+    if (it != path_to_iNum.end()){
+        INUM_TYPE iNum = it->second;
+        stbuf->st_size = mapping_table[iNum].logical_size_for_host;
+    }
+    path_to_iNum_shared_lock.unlock();
     return 0;
 }
 
@@ -97,7 +121,7 @@ static int cdcfs_create(const char *path, mode_t mode, struct fuse_file_info *fi
     int res;
     char full_path[1024];
     snprintf(full_path, sizeof(full_path), "%s%s", BACKEND, path);
-    DEBUG_MESSAGE("create: " << path);
+    DEBUG_MESSAGE("[create]" << path);
     
     res = creat(full_path, mode);
     if (res == -1) {
@@ -118,7 +142,7 @@ static int cdcfs_open(const char *path, struct fuse_file_info *fi) {
     int res;
     char full_path[1024];
     snprintf(full_path, sizeof(full_path), "%s%s", BACKEND, path);
-    DEBUG_MESSAGE("open: " << path);
+    DEBUG_MESSAGE("[open]" << path);
 
     res = open(full_path, fi->flags);
     if (res == -1) {
@@ -126,22 +150,31 @@ static int cdcfs_open(const char *path, struct fuse_file_info *fi) {
     }
 
     fi->fh = res;
-    DEBUG_MESSAGE("open: " << "(file handler)" << fi->fh);
-    prepare_write(path, fi->fh);
+    if (fi->flags & O_WRONLY) {
+        prepare_write(path, fi->fh);
+    }
+    else{
+        PATH_TYPE path_str(path);
+        INUM_TYPE iNum = get_inum(path_str);
+        std::unique_lock<std::shared_mutex> get_iNum_by_fh_unique_lock(get_iNum_by_fh_mutex);
+        get_iNum_by_fh[res] = iNum;    // cahce the iNum by file handler
+        get_iNum_by_fh_unique_lock.unlock();
+    }
     return 0;
 }
 
 static int cdcfs_release(const char *path, struct fuse_file_info *fi) {
     int res;
-    DEBUG_MESSAGE("close: " << path);
+    DEBUG_MESSAGE("[release]" << path);
 
+    std::unique_lock<std::shared_mutex> get_iNum_by_fh_unique_lock(get_iNum_by_fh_mutex);
     auto it = get_iNum_by_fh.find(fi->fh);
     INUM_TYPE iNum = it->second;
     get_iNum_by_fh.erase(it);
+    get_iNum_by_fh_unique_lock.unlock();
 
     // write back file buffer
     int write_back_ptr = 0;
-    DEBUG_MESSAGE("release: write back: " << file_buffer[iNum].byte_cnt << " to " << path);
     while (write_back_ptr < file_buffer[iNum].byte_cnt){
         // not implement content chunking yet, use fixed sized
         int cut_pos = file_buffer[iNum].byte_cnt;
@@ -150,9 +183,12 @@ static int cdcfs_release(const char *path, struct fuse_file_info *fi) {
         SHA1((const unsigned char *)file_buffer[iNum].buf + write_back_ptr, cut_pos, (unsigned char *)cur_fp);
         FP_TYPE new_fp(cur_fp, SHA_DIGEST_LENGTH);
 
+        std::unique_lock<std::shared_mutex> fp_store_mutex_unique_lock(fp_store_mutex);
+        total_write_size += cut_pos;
         auto fp_store_iter = fp_store.find(new_fp);
         if (fp_store_iter != fp_store.end()){   // found
-            DEBUG_MESSAGE("write: found duplicate group!!");
+            DEBUG_MESSAGE("found duplicate group!!");
+            total_dedup_size += cut_pos;
             mapping_table[iNum].group_pos.push_back(fp_store_iter->second);
             mapping_table[iNum].group_offset.push_back(file_buffer[iNum].st_byte + write_back_ptr);
             int blk_count = std::ceil((float)cut_pos / BLOCK_SIZE);
@@ -166,9 +202,9 @@ static int cdcfs_release(const char *path, struct fuse_file_info *fi) {
             new_group_addr->file_st_blk = mapping_table[iNum].actual_size_in_disk / BLOCK_SIZE;
             new_group_addr->file_blk_cnt = std::ceil((float)cut_pos / BLOCK_SIZE);
             int res = pwrite(fi->fh, file_buffer[iNum].buf + write_back_ptr, cut_pos, mapping_table[iNum].actual_size_in_disk);
-            DEBUG_MESSAGE("write: (cut pos) " << cut_pos << " (actual_size_in_disk) " << mapping_table[iNum].actual_size_in_disk);
+            DEBUG_MESSAGE("cut pos: " << cut_pos << " actual_size_in_disk: " << mapping_table[iNum].actual_size_in_disk);
             if (res == -1){
-                PRINT_WARNING("write: write back to disk failed!!");
+                PRINT_WARNING("write back to disk failed!!");
                 delete new_group_addr;
                 return -errno;
             }
@@ -181,6 +217,7 @@ static int cdcfs_release(const char *path, struct fuse_file_info *fi) {
             }
             fp_store[new_fp] = new_group_addr;
         }
+        fp_store_mutex_unique_lock.unlock();
 
         write_back_ptr += cut_pos;
     }
@@ -198,7 +235,7 @@ static int cdcfs_utime(const char *path, struct utimbuf *ubuf) {
     int res;
     char full_path[1024];
     snprintf(full_path, sizeof(full_path), "%s%s", BACKEND, path);
-    DEBUG_MESSAGE("utime: " << path);
+    DEBUG_MESSAGE("[utime]" << path);
 
     res = utime(full_path, ubuf);
     if (res == -1) {
@@ -210,13 +247,19 @@ static int cdcfs_utime(const char *path, struct utimbuf *ubuf) {
 static int cdcfs_read(const char *path, char *buf, size_t size, off_t offset,
                       struct fuse_file_info *fi) {
     int res;
-    DEBUG_MESSAGE("read: (" << path << ") offset: (" << offset << ") size: (" << size << ")");
+    DEBUG_MESSAGE("[read]" << path << " offset: " << offset << " size: " << size);
 
     if (fi->fh < 0) {
         return -errno;
     }
-    //DEBUG_MESSAGE("read: " << "(file handler)" << fi->fh);
+    std::shared_lock<std::shared_mutex> get_iNum_by_fh_shared_lock(get_iNum_by_fh_mutex);
     INUM_TYPE iNum = get_iNum_by_fh[fi->fh];
+    DEBUG_MESSAGE("iNum: " << (unsigned int)iNum);
+    get_iNum_by_fh_shared_lock.unlock();
+    if (offset + size > mapping_table[iNum].logical_size_for_host){
+        size = mapping_table[iNum].logical_size_for_host - offset;
+    }
+
     unsigned long start_group_id = mapping_table[iNum].group_id[offset / BLOCK_SIZE];               // included the first block
     unsigned long final_group_id = mapping_table[iNum].group_id[(offset + size - 1) / BLOCK_SIZE];  // included the last block
 
@@ -227,15 +270,16 @@ static int cdcfs_read(const char *path, char *buf, size_t size, off_t offset,
     size_t end_offset = offset + size;
 
     for(unsigned long curr_group_id = start_group_id; curr_group_id <= final_group_id; curr_group_id++) {
-        //DEBUG_MESSAGE("read group: " << curr_group_id);
+        if (curr_group_id > mapping_table[iNum].group_pos.size()) {
+            break;
+        }
         off_t start_offset_in_group = cur_offset - mapping_table[iNum].group_offset[curr_group_id];
         size_t group_size = mapping_table[iNum].group_pos[curr_group_id]->file_blk_cnt * BLOCK_SIZE;
         off_t end_offset_in_group = std::min(mapping_table[iNum].group_offset[curr_group_id] + group_size, end_offset) - mapping_table[iNum].group_offset[curr_group_id];
         off_t offset_in_file = mapping_table[iNum].group_pos[curr_group_id]->file_st_blk * BLOCK_SIZE;
-        //DEBUG_MESSAGE("offset_in_group" << offset_in_group << "offset in file" << offset_in_file << "group size" << group_size);
         INUM_TYPE group_iNum = mapping_table[iNum].group_pos[curr_group_id]->iNum;
         if (group_iNum == iNum){    // not being dedup group
-            //DEBUG_MESSAGE("read: (iNum)" << (int)iNum << " (offset)" <<  offset_in_file + offset_in_group << "(size)" << group_size - offset_in_group);
+            DEBUG_MESSAGE("read " << path << "(" << (int)group_iNum << ")" << " in group " << curr_group_id << " from " << offset + total_read_byes << " to " << end_offset);
             res = pread(fi->fh, buf_ptr, end_offset_in_group - start_offset_in_group, offset_in_file + start_offset_in_group);
         }
         else{                       // being dedup group
@@ -244,6 +288,7 @@ static int cdcfs_read(const char *path, char *buf, size_t size, off_t offset,
                 snprintf(full_path, sizeof(full_path), "%s%s", BACKEND, iNum_to_path[group_iNum].c_str());
                 fh_cache[group_iNum] = open(full_path, O_RDONLY | O_DIRECT);
             }
+            DEBUG_MESSAGE("read " << iNum_to_path[group_iNum] << "(" << (int)group_iNum << ")" << " in dedup group " << curr_group_id << " from " << offset + total_read_byes << " to " << end_offset);
             res = pread(fh_cache[group_iNum], buf_ptr, end_offset_in_group - start_offset_in_group, offset_in_file + start_offset_in_group);
         }
         buf_ptr += end_offset_in_group - start_offset_in_group;
@@ -272,12 +317,13 @@ fail:
 * 3. hashing the chunk.
 */
 static int cdcfs_write(const char *path, const char *buf, size_t size, off_t offset, struct fuse_file_info *fi) {
-    DEBUG_MESSAGE("write: (" << path << ") offset: (" << offset << ") size: (" << size << ")");
+    DEBUG_MESSAGE("[write]" << path << " offset: " << offset << " size: " << size);
 
     if (fi->fh < 0)
         return -errno;
-
+    std::shared_lock<std::shared_mutex> get_iNum_by_fh_shared_lock(get_iNum_by_fh_mutex);
     INUM_TYPE iNum = get_iNum_by_fh[fi->fh];
+    get_iNum_by_fh_shared_lock.unlock();
     buffer_entry *in_buffer_data = &file_buffer[iNum];
 
     if (in_buffer_data->byte_cnt > 0 && in_buffer_data->st_byte + in_buffer_data->byte_cnt != offset) {     // file buffer is not empty and current write is not continous.
@@ -294,10 +340,11 @@ static int cdcfs_write(const char *path, const char *buf, size_t size, off_t off
 
     size_t less_size = size;
     char * curr_buf_ptr = (char *)buf;
+    mapping_table[iNum].logical_size_for_host += size;
     while(less_size > 0){
         bool can_fill_buffer = in_buffer_data->byte_cnt + less_size >= MAX_GROUP_SIZE;
         if (can_fill_buffer){
-            DEBUG_MESSAGE("write: start write back file buffer");
+            DEBUG_MESSAGE("start write back file buffer");
             int write_into_buffer_size = MAX_GROUP_SIZE - in_buffer_data->byte_cnt;
             memcpy(in_buffer_data->buf + in_buffer_data->byte_cnt, curr_buf_ptr, write_into_buffer_size);
             less_size -= write_into_buffer_size;
@@ -309,9 +356,13 @@ static int cdcfs_write(const char *path, const char *buf, size_t size, off_t off
             SHA1((const unsigned char *)in_buffer_data->buf, cut_pos, (unsigned char *)cur_fp);
             FP_TYPE new_fp(cur_fp, SHA_DIGEST_LENGTH);
             // query fp store
+
+            std::unique_lock<std::shared_mutex> fp_store_mutex_unique_lock(fp_store_mutex);
+            total_write_size += cut_pos;
             auto fp_store_iter = fp_store.find(new_fp);
             if (fp_store_iter != fp_store.end()){   // found
-                DEBUG_MESSAGE("write: found duplicate group!!");
+                DEBUG_MESSAGE("found duplicate group!!");
+                total_dedup_size += cut_pos;
                 mapping_table[iNum].group_pos.push_back(fp_store_iter->second);
                 mapping_table[iNum].group_offset.push_back(file_buffer[iNum].st_byte);
                 for(int i = 0; i < cut_pos / BLOCK_SIZE; i++){
@@ -337,6 +388,7 @@ static int cdcfs_write(const char *path, const char *buf, size_t size, off_t off
                 }
                 fp_store[new_fp] = new_group_addr;
             }
+            fp_store_mutex_unique_lock.unlock();
             // update buffer
             if (cut_pos < MAX_GROUP_SIZE){
                 memcpy(in_buffer_data->buf, in_buffer_data->buf + cut_pos, MAX_GROUP_SIZE - cut_pos);
@@ -358,7 +410,7 @@ static int cdcfs_truncate(const char *path, off_t size) {
     int res;
     char full_path[1024];
     snprintf(full_path, sizeof(full_path), "%s%s", BACKEND, path);
-    DEBUG_MESSAGE("truncate: " << path << " to " << size);
+    DEBUG_MESSAGE("[truncate]" << path << " size: " << size);
 
     res = truncate(full_path, size);
     if (res == -1) {
@@ -369,7 +421,7 @@ static int cdcfs_truncate(const char *path, off_t size) {
 
 static int cdcfs_ftruncate(const char *path, off_t size, fuse_file_info *fi) {
     int res;
-    DEBUG_MESSAGE("ftruncate: " << path);
+    DEBUG_MESSAGE("[ftruncate]" << path);
 
     if  (fi == NULL) {
         return -errno;
@@ -399,7 +451,7 @@ static int cdcfs_readlink(const char *path, char *buf, size_t size) {
     int res;
     char full_path[1024];
     snprintf(full_path, sizeof(full_path), "%s%s", BACKEND, path);
-    DEBUG_MESSAGE("readlink: " << full_path);
+    DEBUG_MESSAGE("[readlink]" << full_path);
 
     res = readlink(full_path, buf, size - 1);
     if (res == -1) {
@@ -417,7 +469,7 @@ static int cdcfs_link(const char *oldpath, const char *newpath) {
     char full_new[1024];
     snprintf(full_old, sizeof(full_old), "%s%s", BACKEND, oldpath);
     snprintf(full_new, sizeof(full_new), "%s%s", BACKEND, newpath);
-    DEBUG_MESSAGE("link: " << full_new << " to " << full_old);
+    DEBUG_MESSAGE("[link]" << "dest: " << full_new << " src: " << full_old);
     
     res = link(full_old, full_new);
     if (res == -1) {
@@ -432,7 +484,7 @@ static int cdcfs_symlink(const char *oldpath, const char *newpath) {
     char full_new[1024];
     snprintf(full_old, sizeof(full_old), "%s%s", BACKEND, oldpath);
     snprintf(full_new, sizeof(full_new), "%s%s", BACKEND, newpath);
-    DEBUG_MESSAGE("symlink: " << full_new << " to " << full_old);
+    DEBUG_MESSAGE("[symlink]" << "dest" << full_new << " src: " << full_old);
 
     res = symlink(full_old, full_new);
     if (res == -1) {

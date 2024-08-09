@@ -3,6 +3,12 @@
 #include "file.h"
 #include "dir.h"
 
+void cdcfs_leave(void *param){
+    PRINT_MESSAGE("\n----------------------------------------leaving CDCFS !!----------------------------------------");
+    PRINT_MESSAGE("total write size:" << (float)total_write_size / 1000000000 << "GB");
+    PRINT_MESSAGE("total dedup rate:" << (float)total_dedup_size / total_write_size * 100 << "%");
+}
+
 static struct fuse_operations cdcfs_oper = {
     .getattr        = cdcfs_getattr,
     .readlink       = cdcfs_readlink,
@@ -20,6 +26,7 @@ static struct fuse_operations cdcfs_oper = {
     .opendir        = cdcfs_opendir,
     .readdir        = cdcfs_readdir,
     .releasedir     = cdcfs_releasedir,
+    .destroy        = cdcfs_leave,
     .create         = cdcfs_create,
     .ftruncate      = cdcfs_ftruncate,
 };
