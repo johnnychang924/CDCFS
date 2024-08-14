@@ -4,11 +4,10 @@
 #include "dir.h"
 
 void cdcfs_leave(void *param){
-    PRINT_MESSAGE("\n----------------------------------------leaving CDCFS !!----------------------------------------");
+    PRINT_MESSAGE("\n----------------------------------------leaving CDCFS !!!----------------------------------------");
     PRINT_MESSAGE("total write size:" << (float)total_write_size / 1000000000 << "GB");
     PRINT_MESSAGE("total dedup rate:" << (float)total_dedup_size / total_write_size * 100 << "%");
 }
-
 static struct fuse_operations cdcfs_oper = {
     .getattr        = cdcfs_getattr,
     .readlink       = cdcfs_readlink,
@@ -17,7 +16,7 @@ static struct fuse_operations cdcfs_oper = {
     .rmdir          = cdcfs_rmdir,
     .symlink        = cdcfs_symlink,
     .link           = cdcfs_link,
-    .truncate       = cdcfs_truncate,
+    //.truncate       = cdcfs_truncate,
     .utime          = cdcfs_utime,
     .open           = cdcfs_open,
     .read           = cdcfs_read,
@@ -28,9 +27,18 @@ static struct fuse_operations cdcfs_oper = {
     .releasedir     = cdcfs_releasedir,
     .destroy        = cdcfs_leave,
     .create         = cdcfs_create,
-    .ftruncate      = cdcfs_ftruncate,
+    //.ftruncate      = cdcfs_ftruncate,
 };
 
 int main(int argc, char *argv[]) {
+    PRINT_MESSAGE("----------------------------------------entering CDCFS !!----------------------------------------");
+    for (INUM_TYPE iNum = 0; iNum < MAX_INODE_NUM - 1; ++iNum) {
+        free_iNum.insert(iNum);
+    }
+    for(FILE_HANDLER_INDEX_TYPE file_handler = 0; file_handler < MAX_FILE_HANDLER - 1; ++file_handler){
+        free_file_handler.insert(file_handler);
+    }
+    cdc = fastcdc_init(512, 512, 512);
+    ctx = &cdc;
     return fuse_main(argc, argv, &cdcfs_oper, NULL);
 }
