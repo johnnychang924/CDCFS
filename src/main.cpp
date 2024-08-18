@@ -1,5 +1,6 @@
 #define FUSE_USE_VERSION 30
 
+#include <filesystem>
 #include "file.h"
 #include "dir.h"
 
@@ -27,10 +28,23 @@ static struct fuse_operations cdcfs_oper = {
     .releasedir     = cdcfs_releasedir,
     .destroy        = cdcfs_leave,
     .create         = cdcfs_create,
-    //.ftruncate      = cdcfs_ftruncate,
+    .ftruncate      = cdcfs_ftruncate,
 };
 
 int main(int argc, char *argv[]) {
+    // remove every file in backend directory.
+    bool show_confirm = false;
+    char replay;
+    for (const auto& entry : std::filesystem::directory_iterator(BACKEND)){
+        if (!show_confirm){
+            PRINT_MESSAGE("WARNING: BACKEND directory is not empty, all files in it will be removed!![y|n]");
+            std::cin >> replay;
+            show_confirm = true;
+            if (replay == 'n') return 0;
+        }
+        std::filesystem::remove_all(entry.path());
+    }
+    // init CDCFS data structure
     PRINT_MESSAGE("----------------------------------------entering CDCFS !!----------------------------------------");
     for (INUM_TYPE iNum = 0; iNum < MAX_INODE_NUM - 1; ++iNum) {
         free_iNum.insert(iNum);
@@ -38,7 +52,10 @@ int main(int argc, char *argv[]) {
     for(FILE_HANDLER_INDEX_TYPE file_handler = 0; file_handler < MAX_FILE_HANDLER - 1; ++file_handler){
         free_file_handler.insert(file_handler);
     }
-    cdc = fastcdc_init(512, 512, 512);
+    // init fastcdc engine
+    cdc = fastcdc_init(0, 4096, 16384);
+    //cdc = fastcdc_init(512, 512, 512);
     ctx = &cdc;
+    // start CDCFS
     return fuse_main(argc, argv, &cdcfs_oper, NULL);
 }

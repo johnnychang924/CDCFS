@@ -157,11 +157,14 @@ static int cdcfs_release(const char *path, struct fuse_file_info *fi) {
     // write back file buffer
     int write_back_ptr = 0;
     while (write_back_ptr < file_buffer->byte_cnt){
+        DEBUG_MESSAGE("  start write back file buffer");
         // not implement content chunking yet, use fixed sized
-        int cut_pos = 512;
+        //int cut_pos = std::min(file_buffer->byte_cnt, (uint16_t)4096);
         //int cut_pos = file_buffer->byte_cnt;
-        /*int cut_pos = cut((const uint8_t*)file_buffer->content + write_back_ptr, file_buffer->byte_cnt - write_back_ptr, ctx->mi, ctx->ma, ctx->ns,
-                      ctx->mask_s, ctx->mask_l);*/
+        int cut_pos = cut((const uint8_t*)file_buffer->content + write_back_ptr, file_buffer->byte_cnt - write_back_ptr, ctx->mi, ctx->ma, ctx->ns,
+                      ctx->mask_s, ctx->mask_l);
+
+        DEBUG_MESSAGE("    cut pos: " << cut_pos << " actual_size_in_disk: " << mapping_table[iNum].actual_size_in_disk);
 
         std::unique_lock<std::shared_mutex> unique_status_record_lock(status_record_mutex);
         total_write_size += cut_pos;
@@ -175,7 +178,7 @@ static int cdcfs_release(const char *path, struct fuse_file_info *fi) {
         auto fp_store_iter = fp_store.find(new_fp);
         shared_fp_store_lock.unlock();
         if (fp_store_iter != fp_store.end()){   // found
-            DEBUG_MESSAGE("found duplicate group!!");
+            DEBUG_MESSAGE("    found duplicate group!!");
             unique_status_record_lock.lock();
             total_dedup_size += cut_pos;
             unique_status_record_lock.unlock();
@@ -194,7 +197,6 @@ static int cdcfs_release(const char *path, struct fuse_file_info *fi) {
             new_group_addr->start_byte = mapping_table[iNum].actual_size_in_disk;
             new_group_addr->group_length = cut_pos;
             int res = pwrite(file_handler[fi->fh].fh, file_buffer->content + write_back_ptr, cut_pos, mapping_table[iNum].actual_size_in_disk);
-            DEBUG_MESSAGE("cut pos: " << cut_pos << " actual_size_in_disk: " << mapping_table[iNum].actual_size_in_disk);
             if (res == -1){
                 PRINT_WARNING("write back to disk failed!!");
                 delete new_group_addr;
@@ -266,7 +268,7 @@ static int cdcfs_read(const char *path, char *buf, size_t size, off_t offset, st
         if (less_size < read_size) read_size = less_size;
         INUM_TYPE group_iNum = mapping_table[iNum].group_pos[cur_group_idx]->iNum;
         if (group_iNum == iNum){    // not being dedup group
-            DEBUG_MESSAGE("reading " << path << "(" << (int)group_iNum << ")" << " in group " << cur_group_idx << " from " << read_start_offset << " until " << read_size);
+            DEBUG_MESSAGE("  reading " << path << "(" << (int)group_iNum << ")" << " in group " << cur_group_idx << " from " << read_start_offset << " until " << read_size);
             res = pread(file_handler[fi->fh].fh, buf_ptr, read_size, read_start_offset);
         }
         else{                       // being dedup group
@@ -275,7 +277,7 @@ static int cdcfs_read(const char *path, char *buf, size_t size, off_t offset, st
                 snprintf(full_path, sizeof(full_path), "%s%s", BACKEND, iNum_to_path[group_iNum].c_str());
                 fh_cache[group_iNum] = open(full_path, O_RDONLY | O_DIRECT);
             }
-            DEBUG_MESSAGE("reading " << iNum_to_path[group_iNum] << "(" << (int)group_iNum << ")" << " in duplicate group " << cur_group_idx << " from " << read_start_offset << " until " << read_size);
+            DEBUG_MESSAGE("  reading " << iNum_to_path[group_iNum] << "(" << (int)group_iNum << ")" << " in duplicate group " << cur_group_idx << " from " << read_start_offset << " until " << read_size);
             res = pread(fh_cache[group_iNum], buf_ptr, read_size, read_start_offset);
         }
         if ((unsigned long)res < read_size) goto fail;
@@ -291,7 +293,7 @@ fail:
     for (auto it = fh_cache.begin(); it!= fh_cache.end(); ++it) {
         close(it->second);
     }
-    DEBUG_MESSAGE("read fail: " << res);
+    DEBUG_MESSAGE("    read fail: " << res);
     return -errno;
 }
 
@@ -319,17 +321,17 @@ static int cdcfs_write(const char *path, const char *buf, size_t size, off_t off
     while (less_size > 0) {
         bool can_fill_buffer = in_buffer_data->byte_cnt + less_size >= MAX_GROUP_SIZE;
         if (can_fill_buffer){
-            DEBUG_MESSAGE("start write back file buffer");
+            DEBUG_MESSAGE("  start write back file buffer");
             int write_into_buffer_size = MAX_GROUP_SIZE - in_buffer_data->byte_cnt;
             memcpy(in_buffer_data->content + in_buffer_data->byte_cnt, cur_buf_ptr, write_into_buffer_size);
             less_size -= write_into_buffer_size;
             cur_buf_ptr += write_into_buffer_size;
             // content defined chunking not implement -_-!
-            int cut_pos = 512;
+            //int cut_pos = 4096;
             //int cut_pos = MAX_GROUP_SIZE; // use fixed chunking for now
-            /*int cut_pos = cut((const uint8_t*)in_buffer_data->content, MAX_GROUP_SIZE, ctx->mi, ctx->ma, ctx->ns,
-                      ctx->mask_s, ctx->mask_l);*/
-            DEBUG_MESSAGE("cut pos: " << cut_pos << " byte cnt: " << in_buffer_data->byte_cnt);
+            int cut_pos = cut((const uint8_t*)in_buffer_data->content, MAX_GROUP_SIZE, ctx->mi, ctx->ma, ctx->ns,
+                      ctx->mask_s, ctx->mask_l);
+            DEBUG_MESSAGE("    cut pos: " << cut_pos << " byte cnt: " << in_buffer_data->byte_cnt);
             std::unique_lock<std::shared_mutex> unique_status_record_lock(status_record_mutex);
             total_write_size += cut_pos;
             unique_status_record_lock.unlock();
@@ -342,7 +344,7 @@ static int cdcfs_write(const char *path, const char *buf, size_t size, off_t off
             auto fp_store_iter = fp_store.find(new_fp);
             shared_fp_store_lock.unlock();
             if (fp_store_iter != fp_store.end()){   // found
-                DEBUG_MESSAGE("found duplicate group!!");
+                DEBUG_MESSAGE("    found duplicate group!!");
                 unique_status_record_lock.lock();
                 total_dedup_size += cut_pos;
                 unique_status_record_lock.unlock();
@@ -405,7 +407,7 @@ static int cdcfs_write(const char *path, const char *buf, size_t size, off_t off
         return -errno;
     }
     return 0;
-}
+}*/
 
 static int cdcfs_ftruncate(const char *path, off_t size, fuse_file_info *fi) {
     int res;
@@ -415,7 +417,7 @@ static int cdcfs_ftruncate(const char *path, off_t size, fuse_file_info *fi) {
         return -errno;
     }
 
-    res = ftruncate(fi->fh, size);
+    res = ftruncate(file_handler[fi->fh].fh, size);
     if (res == -1) {
         return -errno;
     }
@@ -433,7 +435,7 @@ static int cdcfs_unlink(const char *path) {
         return -errno;
     }
     return 0;
-}*/
+}
 
 static int cdcfs_readlink(const char *path, char *buf, size_t size) {
     int res;
