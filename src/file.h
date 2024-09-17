@@ -395,7 +395,7 @@ static int cdcfs_write(const char *path, const char *buf, size_t size, off_t off
             std::shared_lock<std::shared_mutex> shared_fp_store_lock(fp_store_mutex);
             auto fp_store_iter = fp_store.find(new_fp);
             shared_fp_store_lock.unlock();
-            if (fp_store_iter != fp_store.end() && false){   // found
+            if (fp_store_iter != fp_store.end()){   // found
                 DEBUG_MESSAGE("    found duplicate group!!");
                 unique_status_record_lock.lock();
                 total_dedup_size += cut_pos;
