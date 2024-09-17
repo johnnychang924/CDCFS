@@ -178,10 +178,34 @@ static int cdcfs_release(const char *path, struct fuse_file_info *fi) {
         SHA1((const unsigned char *)file_buffer->content + write_back_ptr, cut_pos, (unsigned char *)cur_fp);
         FP_TYPE new_fp(cur_fp, SHA_DIGEST_LENGTH);
 
+        #ifdef NODEDUPE
+            group_addr *new_group_addr = new group_addr;
+            new_group_addr->iNum = iNum;
+            new_group_addr->ref_times = 1;
+            new_group_addr->start_byte = mapping_table[iNum].actual_size_in_disk;
+            new_group_addr->group_length = cut_pos;
+            int res = pwrite(file_handler[fi->fh].fh, file_buffer->content + write_back_ptr, cut_pos, mapping_table[iNum].actual_size_in_disk);
+            if (res == -1){
+                PRINT_WARNING("write back to disk failed!!");
+                delete new_group_addr;
+                return -errno;
+            }
+            int blk_count = std::ceil((float)cut_pos / BLOCK_SIZE);
+            mapping_table[iNum].actual_size_in_disk += cut_pos;
+            mapping_table[iNum].group_pos.push_back(new_group_addr);
+            mapping_table[iNum].group_offset.push_back(file_buffer->start_byte + write_back_ptr);
+            for(int i = 0; i < blk_count; i++){
+                mapping_table[iNum].group_idx.push_back(mapping_table[iNum].group_pos.size() - 1);
+            }
+            std::unique_lock<std::shared_mutex> unique_fp_store_lock(fp_store_mutex);
+            fp_store[new_fp] = new_group_addr;
+            unique_fp_store_lock.unlock();
+        #endif
+        #ifndef NODEDUPE
         std::unique_lock<std::shared_mutex> shared_fp_store_lock(fp_store_mutex);
         auto fp_store_iter = fp_store.find(new_fp);
         shared_fp_store_lock.unlock();
-        if (fp_store_iter != fp_store.end() && false){   // found
+        if (fp_store_iter != fp_store.end()){   // found
             DEBUG_MESSAGE("    found duplicate group!!");
             unique_status_record_lock.lock();
             total_dedup_size += cut_pos;
@@ -217,6 +241,7 @@ static int cdcfs_release(const char *path, struct fuse_file_info *fi) {
             fp_store[new_fp] = new_group_addr;
             unique_fp_store_lock.unlock();
         }
+        #endif
 
         write_back_ptr += cut_pos;
     }
@@ -344,6 +369,29 @@ static int cdcfs_write(const char *path, const char *buf, size_t size, off_t off
             SHA1((const unsigned char *)in_buffer_data->content, cut_pos, (unsigned char *)cur_fp);
             FP_TYPE new_fp(cur_fp, SHA_DIGEST_LENGTH);
             // query fp store
+            #ifdef NODEDUPE
+                group_addr *new_group_addr = new group_addr;
+                new_group_addr->iNum = iNum;
+                new_group_addr->ref_times = 1;
+                new_group_addr->start_byte = mapping_table[iNum].actual_size_in_disk;
+                new_group_addr->group_length = cut_pos;
+                int res = pwrite(file_handler[fi->fh].fh, in_buffer_data->content, cut_pos, mapping_table[iNum].actual_size_in_disk);
+                if (res == -1){
+                    PRINT_WARNING("write: write back to disk failed!!");
+                    delete new_group_addr;
+                    return -errno;
+                }
+                mapping_table[iNum].actual_size_in_disk += cut_pos;
+                mapping_table[iNum].group_pos.push_back(new_group_addr);
+                mapping_table[iNum].group_offset.push_back(in_buffer_data->start_byte);
+                for(int i = mapping_table[iNum].group_idx.size(); i <= (in_buffer_data->start_byte + cut_pos) / BLOCK_SIZE; i++){
+                    mapping_table[iNum].group_idx.push_back(mapping_table[iNum].group_pos.size() - 1);
+                }
+                std::unique_lock<std::shared_mutex> unique_fp_store_lock(fp_store_mutex);
+                fp_store[new_fp] = new_group_addr;
+                unique_fp_store_lock.unlock();
+            #endif
+            #ifndef NODEDUPE
             std::shared_lock<std::shared_mutex> shared_fp_store_lock(fp_store_mutex);
             auto fp_store_iter = fp_store.find(new_fp);
             shared_fp_store_lock.unlock();
@@ -381,6 +429,7 @@ static int cdcfs_write(const char *path, const char *buf, size_t size, off_t off
                 fp_store[new_fp] = new_group_addr;
                 unique_fp_store_lock.unlock();
             }
+            #endif
             // update buffer
             if (cut_pos < MAX_GROUP_SIZE){
                 //memcpy(in_buffer_data->content, in_buffer_data->content + cut_pos, MAX_GROUP_SIZE - cut_pos);

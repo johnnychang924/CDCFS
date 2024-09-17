@@ -12,6 +12,9 @@ debug: all
 CAFTL: cflags += -DCAFTL
 CAFTL: all
 
+NoDedupe: cflags += -DNODEDUPE
+NoDedupe: all
+
 $(objFolder)%.o: $(srcFolder)%.cpp
 	@mkdir -p $(objFolder)
 	$(CXX) $(cflags) -c -o $@ $<
