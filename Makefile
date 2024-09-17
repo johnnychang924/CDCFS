@@ -9,6 +9,9 @@ all: clean CDCFS
 debug: cflags += -DDEBUG -g
 debug: all
 
+CAFTL: cflags += -DCAFTL
+CAFTL: all
+
 $(objFolder)%.o: $(srcFolder)%.cpp
 	@mkdir -p $(objFolder)
 	$(CXX) $(cflags) -c -o $@ $<

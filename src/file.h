@@ -141,7 +141,8 @@ static int cdcfs_open(const char *path, struct fuse_file_info *fi) {
     if (real_file_handler == -1) return -errno;
 
     fi->fh = get_free_file_handler();
-    char mode = fi->flags & O_WRONLY ? 'w' : 'r';
+    char mode = fi->flags & (O_WRONLY | O_RDWR) ? 'w' : 'r';
+    DEBUG_MESSAGE("mode: " << mode);
     init_file_handler(path, fi->fh, real_file_handler, mode);
     if (file_handler[fi->fh].fh == (FILE_HANDLER_INDEX_TYPE)-1) return -errno;
     else return 0;
@@ -164,6 +165,9 @@ static int cdcfs_release(const char *path, struct fuse_file_info *fi) {
         int cut_pos = cut((const uint8_t*)file_buffer->content + write_back_ptr, file_buffer->byte_cnt - write_back_ptr, ctx->mi, ctx->ma, ctx->ns,
                       ctx->mask_s, ctx->mask_l);
 
+        #ifdef CAFTL
+        cut_pos = std::min(file_buffer->byte_cnt, (uint16_t)BLOCK_SIZE); // use fixed chunking
+        #endif
         DEBUG_MESSAGE("    cut pos: " << cut_pos << " actual_size_in_disk: " << mapping_table[iNum].actual_size_in_disk);
 
         std::unique_lock<std::shared_mutex> unique_status_record_lock(status_record_mutex);
@@ -177,7 +181,7 @@ static int cdcfs_release(const char *path, struct fuse_file_info *fi) {
         std::unique_lock<std::shared_mutex> shared_fp_store_lock(fp_store_mutex);
         auto fp_store_iter = fp_store.find(new_fp);
         shared_fp_store_lock.unlock();
-        if (fp_store_iter != fp_store.end()){   // found
+        if (fp_store_iter != fp_store.end() && false){   // found
             DEBUG_MESSAGE("    found duplicate group!!");
             unique_status_record_lock.lock();
             total_dedup_size += cut_pos;
@@ -326,11 +330,11 @@ static int cdcfs_write(const char *path, const char *buf, size_t size, off_t off
             memcpy(in_buffer_data->content + in_buffer_data->byte_cnt, cur_buf_ptr, write_into_buffer_size);
             less_size -= write_into_buffer_size;
             cur_buf_ptr += write_into_buffer_size;
-            // content defined chunking not implement -_-!
-            //int cut_pos = 4096;
-            //int cut_pos = MAX_GROUP_SIZE; // use fixed chunking for now
             int cut_pos = cut((const uint8_t*)in_buffer_data->content, MAX_GROUP_SIZE, ctx->mi, ctx->ma, ctx->ns,
                       ctx->mask_s, ctx->mask_l);
+            #ifdef CAFTL
+            cut_pos = BLOCK_SIZE; // use fixed chunking
+            #endif
             DEBUG_MESSAGE("    cut pos: " << cut_pos << " byte cnt: " << in_buffer_data->byte_cnt);
             std::unique_lock<std::shared_mutex> unique_status_record_lock(status_record_mutex);
             total_write_size += cut_pos;
@@ -343,7 +347,7 @@ static int cdcfs_write(const char *path, const char *buf, size_t size, off_t off
             std::shared_lock<std::shared_mutex> shared_fp_store_lock(fp_store_mutex);
             auto fp_store_iter = fp_store.find(new_fp);
             shared_fp_store_lock.unlock();
-            if (fp_store_iter != fp_store.end()){   // found
+            if (fp_store_iter != fp_store.end() && false){   // found
                 DEBUG_MESSAGE("    found duplicate group!!");
                 unique_status_record_lock.lock();
                 total_dedup_size += cut_pos;
@@ -388,7 +392,11 @@ static int cdcfs_write(const char *path, const char *buf, size_t size, off_t off
             in_buffer_data->byte_cnt = MAX_GROUP_SIZE - cut_pos;
         }
         else{
+            DEBUG_MESSAGE("start fill buffer");
+            DEBUG_MESSAGE("in_buffer_data->byte_cnt: " << in_buffer_data->byte_cnt);
+            DEBUG_MESSAGE("less_size: " << less_size);
             memcpy(in_buffer_data->content + in_buffer_data->byte_cnt, cur_buf_ptr, less_size);
+            DEBUG_MESSAGE("end fill buffer");
             in_buffer_data->byte_cnt += less_size;
             less_size = 0;
         }
@@ -411,7 +419,8 @@ static int cdcfs_write(const char *path, const char *buf, size_t size, off_t off
 
 static int cdcfs_ftruncate(const char *path, off_t size, fuse_file_info *fi) {
     int res;
-    DEBUG_MESSAGE("[ftruncate]" << path);
+    return 0;
+    DEBUG_MESSAGE("[ftruncate]" << path << ", size: " << size);
 
     if  (fi == NULL) {
         return -errno;
