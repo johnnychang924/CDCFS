@@ -270,60 +270,141 @@ static int cdcfs_utime(const char *path, struct utimbuf *ubuf) {
 }
 
 static int cdcfs_read(const char *path, char *buf, size_t size, off_t offset, struct fuse_file_info *fi) {
-    int res;
     DEBUG_MESSAGE("[read]" << path << " offset: " << offset << " size: " << size);
+    struct interval {off_t start; off_t end;};
 
+    // find first block group index
     INUM_TYPE iNum = file_handler[fi->fh].iNum;
-    unsigned long cur_group_idx = (unsigned long)offset / BLOCK_SIZE < mapping_table[iNum].group_idx.size() ? 
+    unsigned long start_group_idx = (unsigned long)offset / BLOCK_SIZE < mapping_table[iNum].group_idx.size() ? 
         mapping_table[iNum].group_idx[offset / BLOCK_SIZE] : mapping_table[iNum].group_pos.size() - 1;
+    if (mapping_table[iNum].group_pos.size() == 0) return -errno;
     while (true) {
-        off_t cur_group_offset = mapping_table[iNum].group_offset[cur_group_idx];
+        off_t cur_group_offset = mapping_table[iNum].group_offset[start_group_idx];
         if (cur_group_offset > offset)
-            cur_group_idx--;
-        else if(cur_group_offset + mapping_table[iNum].group_pos[cur_group_idx]->group_length <= offset)
-            cur_group_idx++;
+            start_group_idx--;
+        else if(cur_group_offset + mapping_table[iNum].group_pos[start_group_idx]->group_length <= offset)
+            start_group_idx++;
         else break;
+        if (start_group_idx < 0 || start_group_idx >= mapping_table[iNum].group_pos.size()) return -errno;
     }
-
-    char *buf_ptr = buf;
-    off_t cur_offset = offset;
-    std::map<INUM_TYPE, uint64_t> fh_cache;     // cache other file handlers by inode number
-    int total_read_byes = 0;
-    size_t less_size = size;
-    while(less_size > 0 && cur_group_idx < mapping_table[iNum].group_pos.size()) {
-        int offset_in_group = cur_offset - mapping_table[iNum].group_offset[cur_group_idx];
-        off_t read_start_offset = mapping_table[iNum].group_pos[cur_group_idx]->start_byte + offset_in_group;
-        size_t read_size = mapping_table[iNum].group_pos[cur_group_idx]->group_length - offset_in_group;
-        if (less_size < read_size) read_size = less_size;
-        INUM_TYPE group_iNum = mapping_table[iNum].group_pos[cur_group_idx]->iNum;
-        if (group_iNum == iNum){    // not being dedup group
-            DEBUG_MESSAGE("  reading " << path << "(" << (int)group_iNum << ")" << " in group " << cur_group_idx << " from " << read_start_offset << " until " << read_size);
-            res = pread(file_handler[fi->fh].fh, buf_ptr, read_size, read_start_offset);
+    DEBUG_MESSAGE("  start block: " << start_group_idx);
+    
+    // seperate each block group by iNum
+    std::map<INUM_TYPE, std::vector<group_addr *>> group_idx_of_inode;
+    int less = size + (offset - mapping_table[iNum].group_offset[start_group_idx]);
+    unsigned long cur_group_idx = start_group_idx;
+    while(less > 0 && cur_group_idx < mapping_table[iNum].group_pos.size()) {
+        group_addr *cur_group = mapping_table[iNum].group_pos[cur_group_idx];
+        INUM_TYPE cur_iNum = cur_group->iNum;
+        if (group_idx_of_inode.find(cur_iNum) == group_idx_of_inode.end()){
+            group_idx_of_inode[cur_iNum] = std::vector<group_addr *>();
         }
-        else{                       // being dedup group
-            if (fh_cache.find(group_iNum) == fh_cache.end()) {
-                char full_path[1024];
-                snprintf(full_path, sizeof(full_path), "%s%s", BACKEND, iNum_to_path[group_iNum].c_str());
-                fh_cache[group_iNum] = open(full_path, O_RDONLY | O_DIRECT);
-            }
-            DEBUG_MESSAGE("  reading " << iNum_to_path[group_iNum] << "(" << (int)group_iNum << ")" << " in duplicate group " << cur_group_idx << " from " << read_start_offset << " until " << read_size);
-            res = pread(fh_cache[group_iNum], buf_ptr, read_size, read_start_offset);
-        }
-        if ((unsigned long)res < read_size) goto fail;
-        buf_ptr += read_size;
-        less_size -= read_size;
-        cur_offset += read_size;
+        group_idx_of_inode[cur_iNum].push_back(cur_group);
+        less -= cur_group->group_length;
         cur_group_idx++;
-        total_read_byes += read_size;
+    }
+    unsigned long end_group_idx = cur_group_idx;
+
+    DEBUG_MESSAGE("  end block: " << end_group_idx);
+
+    // analyze need to read block group part
+    std::map<group_addr *, interval> inter_group_interval;
+    for (cur_group_idx = start_group_idx; cur_group_idx < end_group_idx; cur_group_idx++) {
+        group_addr *cur_group = mapping_table[iNum].group_pos[cur_group_idx];
+        off_t cur_group_offset = mapping_table[iNum].group_offset[cur_group_idx];
+        off_t inter_group_start = cur_group_offset > offset ? 0 : offset - cur_group_offset;
+        off_t inter_group_end = cur_group_offset + (size_t)cur_group->group_length < offset + size 
+                ? cur_group->group_length : offset + size - cur_group_offset;
+        if (inter_group_interval.find(cur_group) == inter_group_interval.end()){
+            inter_group_interval[cur_group] = { inter_group_start, inter_group_end };
+        }
+        else{
+            inter_group_interval[cur_group].start = std::min(inter_group_interval[cur_group].start, inter_group_start);
+            inter_group_interval[cur_group].end = std::max(inter_group_interval[cur_group].end, inter_group_end);
+        }
     }
 
-    return total_read_byes;
-fail:
-    for (auto it = fh_cache.begin(); it!= fh_cache.end(); ++it) {
-        close(it->second);
+    #ifdef DEBUG
+    for (auto it = group_idx_of_inode.begin(); it!= group_idx_of_inode.end(); ++it){
+        DEBUG_MESSAGE("  INum: " << it->first);
+        for (auto it2 = it->second.begin(); it2!= it->second.end(); ++it2){
+            DEBUG_MESSAGE("    - Start Byte: " << inter_group_interval[*it2].start);
+            DEBUG_MESSAGE("    - End Byte: " << inter_group_interval[*it2].end);
+            DEBUG_MESSAGE("    - Group address: " << (*it2)->start_byte << " - " << (*it2)->group_length);
+        }
     }
-    DEBUG_MESSAGE("    read fail: " << res);
-    return -errno;
+    #endif
+
+    // read each block group into temp buffer
+    char tmp_buf[size];
+    std::map<group_addr *, interval> tmp_buf_map; // map group address contents and its start byte in temp buffer
+    off_t tmp_buf_len = 0;
+    for (auto it = group_idx_of_inode.begin(); it!= group_idx_of_inode.end(); ++it) {
+        INUM_TYPE cur_iNum = it->first;
+        DEBUG_MESSAGE("  reading iNum: " << cur_iNum);
+        uint64_t fh;
+        if (cur_iNum == iNum) fh = file_handler[fi->fh].fh;
+        else{
+            char full_path[1024];
+            snprintf(full_path, sizeof(full_path), "%s%s", BACKEND, iNum_to_path[cur_iNum].c_str());
+            fh = open(full_path, O_RDONLY | O_DIRECT);
+            if (fh == -1UL) return -errno;
+        }
+        // sort group index by each group start bytes
+        std::sort(it->second.begin(), it->second.end(), [](group_addr *group1, group_addr *group2) {
+            return group1->start_byte < group2->start_byte;
+        });
+        for (uint32_t i = 0; i < it->second.size(); ++i){
+            group_addr *cur_group = it->second[i];
+            if (tmp_buf_map.find(cur_group) != tmp_buf_map.end()) continue; // have been read this block before
+            size_t inter_group_len = inter_group_interval[cur_group].end - inter_group_interval[cur_group].start;
+            tmp_buf_map[cur_group] = {tmp_buf_len, tmp_buf_len + (off_t)inter_group_len};
+            tmp_buf_len += inter_group_len;
+            // create a big continuous io
+            uint32_t j = i;
+            off_t io_start = inter_group_interval[cur_group].start + cur_group->start_byte;
+            size_t io_len = inter_group_len;
+            while (++j < it->second.size()){
+                group_addr *next_group = it->second[j];
+                if (tmp_buf_map.find(next_group) != tmp_buf_map.end()) continue; // duplicate block ignore;
+                // next block is continuous
+                if (inter_group_interval[cur_group].end + cur_group->start_byte == inter_group_interval[next_group].start + next_group->start_byte){
+                    inter_group_len = inter_group_interval[next_group].end - inter_group_interval[next_group].start;
+                    tmp_buf_map[next_group] = {tmp_buf_len, tmp_buf_len + (off_t)inter_group_len};
+                    tmp_buf_len += inter_group_len;
+                    io_len += inter_group_len;
+                    cur_group = next_group;
+                    i++;
+                }
+                // next block is not continuous
+                else break;
+            }
+            DEBUG_MESSAGE("  reading " << "(" << (int)cur_iNum << ")" << " from " << io_start << " until " << io_len);
+            uint32_t res = pread(fh, tmp_buf + tmp_buf_len - io_len, io_len, io_start);
+            if (res != io_len) {
+                PRINT_WARNING("  reading  " << io_len << " bytes, but only " << res << " bytes are read");
+                PRINT_WARNING("");
+                if (cur_iNum == iNum) close(fh);
+                return -1;
+            }
+        }
+    }
+
+    // fill return buffer
+    size_t read_size = 0;
+    for (cur_group_idx = start_group_idx; cur_group_idx < end_group_idx; cur_group_idx++) {
+        group_addr *cur_group = mapping_table[iNum].group_pos[cur_group_idx];
+        off_t cur_group_offset = mapping_table[iNum].group_offset[cur_group_idx];
+        off_t cur_inter_group_offset = cur_group_offset > offset ? 0 : offset - cur_group_offset;
+        size_t cur_inter_group_end = cur_group_offset + (size_t)cur_group->group_length < offset + size 
+                ? cur_group->group_length : offset + size - cur_group_offset;
+        off_t in_tmp_buf_offset = tmp_buf_map[cur_group].start + (cur_inter_group_offset - inter_group_interval[cur_group].start);
+        size_t in_tmp_buf_end = tmp_buf_map[cur_group].end - (inter_group_interval[cur_group].end - cur_inter_group_end);
+        DEBUG_MESSAGE("  filling group: " << cur_group_idx << " from buffer: " << in_tmp_buf_offset << " to " << in_tmp_buf_end);
+        memcpy(buf + read_size, tmp_buf + in_tmp_buf_offset, in_tmp_buf_end - in_tmp_buf_offset);
+        read_size += in_tmp_buf_end - in_tmp_buf_offset;
+    }
+    return read_size;
 }
 
 static int cdcfs_write(const char *path, const char *buf, size_t size, off_t offset, struct fuse_file_info *fi) {
@@ -482,7 +563,7 @@ static int cdcfs_ftruncate(const char *path, off_t size, fuse_file_info *fi) {
     return 0;
 }
 
-static int cdcfs_unlink(const char *path) {
+/*static int cdcfs_unlink(const char *path) {
     int res;
     char full_path[1024];
     snprintf(full_path, sizeof(full_path), "%s%s", BACKEND, path);
@@ -493,7 +574,7 @@ static int cdcfs_unlink(const char *path) {
         return -errno;
     }
     return 0;
-}
+}*/
 
 static int cdcfs_readlink(const char *path, char *buf, size_t size) {
     int res;
