@@ -73,6 +73,7 @@ inline FILE_HANDLER_INDEX_TYPE get_free_file_handler(){
 }
 
 inline void release_file_handler(FILE_HANDLER_INDEX_TYPE file_handler_index){
+    if (file_handler_index < 0 || file_handler_index >= MAX_FILE_HANDLER) return;
     std::unique_lock<std::shared_mutex> unique_file_handler_lock(file_handler_mutex);    // lock for freeing file handler
     free_file_handler.insert(file_handler_index);
 }
@@ -127,8 +128,7 @@ static int cdcfs_create(const char *path, mode_t mode, struct fuse_file_info *fi
     if (fi->fh == (FILE_HANDLER_INDEX_TYPE)-1) return -errno;
 
     init_file_handler(path, fi->fh, real_file_handler, 'w');
-    if (file_handler[fi->fh].fh == (FILE_HANDLER_INDEX_TYPE)-1) return -errno;
-    else return 0;
+    return 0;
 }
 
 static int cdcfs_open(const char *path, struct fuse_file_info *fi) {
@@ -141,11 +141,11 @@ static int cdcfs_open(const char *path, struct fuse_file_info *fi) {
     if (real_file_handler == -1) return -errno;
 
     fi->fh = get_free_file_handler();
+    if (fi->fh == (FILE_HANDLER_INDEX_TYPE)-1) return -errno;
     char mode = fi->flags & (O_WRONLY | O_RDWR) ? 'w' : 'r';
     DEBUG_MESSAGE("mode: " << mode);
     init_file_handler(path, fi->fh, real_file_handler, mode);
-    if (file_handler[fi->fh].fh == (FILE_HANDLER_INDEX_TYPE)-1) return -errno;
-    else return 0;
+    return 0;
 }
 
 static int cdcfs_release(const char *path, struct fuse_file_info *fi) {
@@ -245,8 +245,10 @@ static int cdcfs_release(const char *path, struct fuse_file_info *fi) {
 
         write_back_ptr += cut_pos;
     }
-    free(file_buffer->content);
-    file_buffer->content = NULL;
+    if (file_buffer->content != NULL){
+        free(file_buffer->content);
+        file_buffer->content = NULL;
+    }
 
     res = close(file_handler[fi->fh].fh);
     if (res == -1) {
@@ -277,13 +279,13 @@ static int cdcfs_read(const char *path, char *buf, size_t size, off_t offset, st
     INUM_TYPE iNum = file_handler[fi->fh].iNum;
     uint32_t blk_num = offset / BLOCK_SIZE;
     unsigned long start_group_idx;
-    if (blk_num < mapping_table[iNum].group_idx.size() && mapping_table[iNum].group_idx[blk_num] < mapping_table[iNum].group_pos.size()){
+    if (blk_num < mapping_table[iNum].group_idx.size() && (uint32_t)mapping_table[iNum].group_idx[blk_num] < mapping_table[iNum].group_pos.size()){
         start_group_idx = mapping_table[iNum].group_idx[blk_num];
     }
     else{
         start_group_idx = mapping_table[iNum].group_pos.size()-1;
     }
-    if (mapping_table[iNum].group_pos.size() == 0) return 0;
+    if (mapping_table[iNum].group_pos.size() == 0 || size == 0) return 0;
 
     while (true) {
         off_t cur_group_offset = mapping_table[iNum].group_offset[start_group_idx];
@@ -343,7 +345,7 @@ static int cdcfs_read(const char *path, char *buf, size_t size, off_t offset, st
     #endif
 
     // read each block group into temp buffer
-    char tmp_buf[size];
+    char tmp_buf[size + MAX_GROUP_SIZE];        // in some case we will read some useless data, so add MAX_GROUP_SIZE to avoid segmentation fault.
     std::map<group_addr *, interval> tmp_buf_map; // map group address contents and its start byte in temp buffer
     off_t tmp_buf_len = 0;
     for (auto it = group_idx_of_inode.begin(); it!= group_idx_of_inode.end(); ++it) {
@@ -354,8 +356,12 @@ static int cdcfs_read(const char *path, char *buf, size_t size, off_t offset, st
         else{
             char full_path[1024];
             snprintf(full_path, sizeof(full_path), "%s%s", BACKEND, iNum_to_path[cur_iNum].c_str());
+            DEBUG_MESSAGE("  tring to open: " << full_path);
             fh = open(full_path, O_RDONLY | O_DIRECT);
-            if (fh == -1UL) return -errno;
+            if (fh == -1UL) {
+                DEBUG_MESSAGE("  open failed: " << strerror(errno));
+                return -errno;
+            }
         }
         // sort group index by each group start bytes
         std::sort(it->second.begin(), it->second.end(), [](group_addr *group1, group_addr *group2) {
@@ -395,6 +401,7 @@ static int cdcfs_read(const char *path, char *buf, size_t size, off_t offset, st
                 return -1;
             }
         }
+        if (cur_iNum != iNum) close(fh);
     }
 
     // fill return buffer
