@@ -275,9 +275,16 @@ static int cdcfs_read(const char *path, char *buf, size_t size, off_t offset, st
 
     // find first block group index
     INUM_TYPE iNum = file_handler[fi->fh].iNum;
-    unsigned long start_group_idx = (unsigned long)offset / BLOCK_SIZE < mapping_table[iNum].group_idx.size() ? 
-        mapping_table[iNum].group_idx[offset / BLOCK_SIZE] : mapping_table[iNum].group_pos.size() - 1;
-    if (mapping_table[iNum].group_pos.size() == 0) return -errno;
+    uint32_t blk_num = offset / BLOCK_SIZE;
+    unsigned long start_group_idx;
+    if (blk_num < mapping_table[iNum].group_idx.size() && mapping_table[iNum].group_idx[blk_num] < mapping_table[iNum].group_pos.size()){
+        start_group_idx = mapping_table[iNum].group_idx[blk_num];
+    }
+    else{
+        start_group_idx = mapping_table[iNum].group_pos.size()-1;
+    }
+    if (mapping_table[iNum].group_pos.size() == 0) return 0;
+
     while (true) {
         off_t cur_group_offset = mapping_table[iNum].group_offset[start_group_idx];
         if (cur_group_offset > offset)
@@ -285,7 +292,7 @@ static int cdcfs_read(const char *path, char *buf, size_t size, off_t offset, st
         else if(cur_group_offset + mapping_table[iNum].group_pos[start_group_idx]->group_length <= offset)
             start_group_idx++;
         else break;
-        if (start_group_idx < 0 || start_group_idx >= mapping_table[iNum].group_pos.size()) return -errno;
+        if (start_group_idx < 0 || start_group_idx >= mapping_table[iNum].group_pos.size()) return 0;
     }
     DEBUG_MESSAGE("  start block: " << start_group_idx);
     
