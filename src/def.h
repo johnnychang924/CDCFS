@@ -6,16 +6,18 @@
 #define BACKEND "/home/johnnychang/CDCFS/bak"
 #define MAX_GROUP_SIZE 32768
 #define BLOCK_SIZE 4096
+#define DEV_NAME "nvme0n1"
 
 // don't change it!
 #define MAX_INODE_NUM 1048576
 #define MAX_FILE_HANDLER 256
 
 // type define
-#define INUM_TYPE unsigned long
+#define INUM_TYPE long
 #define FP_TYPE std::string
 #define PATH_TYPE std::string
 #define FILE_HANDLER_INDEX_TYPE uint8_t
+#define ZONE_ID_TYPE uint32_t
 
 struct group_addr{
     INUM_TYPE iNum;
@@ -53,6 +55,7 @@ struct file_handler_data{
 #endif
 
 #define PRINT_MESSAGE(msg) std::cout << msg << std::endl
-#define PRINT_WARNING(msg) std::cerr << msg << std::endl
+#define PRINT_WARNING(msg) std::cerr << "WARNING:" << msg << std::endl
+#define PRINT_ERROR(msg) std::cerr << "ERROR: " << msg << std::endl
 
 #endif /* DEF_H */

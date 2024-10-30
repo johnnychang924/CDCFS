@@ -1,8 +1,9 @@
 #define FUSE_USE_VERSION 30
 
 #include <filesystem>
+#include <fstream>
+#include <string>
 #include "file.h"
-#include "dir.h"
 
 static void cdcfs_leave(void *param){
     PRINT_MESSAGE("\n----------------------------------------leaving CDCFS !!!----------------------------------------");
@@ -10,27 +11,57 @@ static void cdcfs_leave(void *param){
     PRINT_MESSAGE("total dedup rate:" << (float)total_dedup_size / total_write_size * 100 << "%");
 }
 
+// I am tired to implement all the functions, so I just implement the most important functions
 static struct fuse_operations cdcfs_oper = {
     .getattr        = cdcfs_getattr,
-    .readlink       = cdcfs_readlink,
+    //.readlink       = cdcfs_readlink,
     .mkdir          = cdcfs_mkdir,
     //.unlink         = cdcfs_unlink,
     .rmdir          = cdcfs_rmdir,
-    .symlink        = cdcfs_symlink,
-    .link           = cdcfs_link,
+    //.symlink        = cdcfs_symlink,
+    //.link           = cdcfs_link,
     //.truncate       = cdcfs_truncate,
-    .utime          = cdcfs_utime,
-    .open           = cdcfs_open,
-    .read           = cdcfs_read,
-    .write          = cdcfs_write,
-    .release        = cdcfs_release,
-    .opendir        = cdcfs_opendir,
+    //.utime          = cdcfs_utime,
+    //.open           = cdcfs_open,
+    //.read           = cdcfs_read,
+    //.write          = cdcfs_write,
+    //.release        = cdcfs_release,
+    //.opendir        = cdcfs_opendir,
     .readdir        = cdcfs_readdir,
-    .releasedir     = cdcfs_releasedir,
+    //.releasedir     = cdcfs_releasedir,
     .destroy        = cdcfs_leave,
-    .create         = cdcfs_create,
-    .ftruncate      = cdcfs_ftruncate,
+    //.create         = cdcfs_create,
+    //.ftruncate      = cdcfs_ftruncate,
 };
+
+int grab_hw_info(std::string path){
+    std::fstream hw_info;
+    hw_info.open(path, std::ios::in);
+    if(!hw_info.is_open()){
+        PRINT_ERROR("failed to grab HW information: " << path);
+        exit(-1);
+    }
+    int ret;
+    hw_info >> ret;
+    return ret;
+}
+
+void init_cdcfs(){
+    PRINT_MESSAGE("----------------------------------------entering CDCFS !!----------------------------------------");
+
+    // greb hardware information
+    std::string path = (std::string)"/sys/block/" + DEV_NAME + "/queue/";
+    int hw_sector_size = grab_hw_info(path + "hw_sector_size");
+    PRINT_MESSAGE("hw sector size: " << hw_sector_size);
+
+    // init CDCFS data structure
+    for (INUM_TYPE iNum = 0; iNum < MAX_INODE_NUM - 1; ++iNum) {
+        free_iNum.insert(iNum);
+    }
+    for(FILE_HANDLER_INDEX_TYPE file_handler = 0; file_handler < MAX_FILE_HANDLER - 1; ++file_handler){
+        free_file_handler.insert(file_handler);
+    }
+}
 
 int main(int argc, char *argv[]) {
     // remove every file in backend directory.
@@ -45,14 +76,7 @@ int main(int argc, char *argv[]) {
         }
         std::filesystem::remove_all(entry.path());
     }
-    // init CDCFS data structure
-    PRINT_MESSAGE("----------------------------------------entering CDCFS !!----------------------------------------");
-    for (INUM_TYPE iNum = 0; iNum < MAX_INODE_NUM - 1; ++iNum) {
-        free_iNum.insert(iNum);
-    }
-    for(FILE_HANDLER_INDEX_TYPE file_handler = 0; file_handler < MAX_FILE_HANDLER - 1; ++file_handler){
-        free_file_handler.insert(file_handler);
-    }
+    init_cdcfs();
     // init fastcdc engine
     cdc = fastcdc_init(0, BLOCK_SIZE, MAX_GROUP_SIZE);
     ctx = &cdc;

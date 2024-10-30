@@ -14,7 +14,9 @@
 #include <mutex>
 #include <shared_mutex>
 #include "def.h"
+#include "dir.h"
 #include "fastcdc.h"
+#include "zonefs.h"
 
 PATH_TYPE iNum_to_path[MAX_INODE_NUM];
 std::unordered_map<PATH_TYPE, INUM_TYPE> path_to_iNum;
@@ -36,24 +38,25 @@ unsigned long total_dedup_size = 0;     // total size of writed file in this fil
 fcdc_ctx cdc, *ctx;
 
 inline INUM_TYPE get_inum(PATH_TYPE path_str){
-    std::shared_lock<std::shared_mutex> shared_create_file_lock(create_file_mutex);     // make sure nobody is creating new file at the same time
-    auto it = path_to_iNum.find(path_str);
-    shared_create_file_lock.unlock();
-    if (it != path_to_iNum.end()){
-        return it->second;
-    }
-    else {
-        std::unique_lock<std::shared_mutex> unique_create_file_lock(create_file_mutex); // lock for creating new file
-        if (free_iNum.empty()){
-            PRINT_WARNING("run out of iNum");
-            return -1;
+    std::vector<std::string> parts = split_path(path_str);
+    node *cur = root;
+    std::stack<node*> history;
+    for (unsigned int i = 0; i < parts.size(); i++) {
+        if (!cur->is_directory) return cur->iNum ? i == parts.size() - 1 : -1;
+        if (parts[i] == "..") {
+            cur = history.top();
+            history.pop();
+            continue;
         }
-        INUM_TYPE new_iNum = *free_iNum.begin();
-        free_iNum.erase(free_iNum.begin());
-        path_to_iNum[path_str] = new_iNum;
-        iNum_to_path[new_iNum] = path_str;
-        return new_iNum;
+        else if (parts[i] == ".") continue;
+        else {
+            auto it = cur->sub_dir.find(parts[i]);
+            if (it == cur->sub_dir.end()) return -1;
+            else cur = it->second;
+        }
+        history.push(cur);
     }
+    return -1;
 }
 
 inline PATH_TYPE get_path(INUM_TYPE iNum){
@@ -96,38 +99,21 @@ inline void init_file_handler(const char *path, FILE_HANDLER_INDEX_TYPE file_han
 }
 
 static int cdcfs_getattr(const char *path, struct stat *stbuf) {
-    int res;
-    char full_path[1024];
-    PATH_TYPE path_str(path);
-    snprintf(full_path, sizeof(full_path), "%s%s", BACKEND, path);
     DEBUG_MESSAGE("[getattr]" << path);
-
-    res = lstat(full_path, stbuf);
-    if (res == -1) {
-        return -errno;
+    std::vector<std::string> splited_path = split_path(path);
+    node *target = get_node(splited_path);
+    if (target == NULL) return -ENOENT;
+    if (target->is_directory){
+        DEBUG_MESSAGE("  is directory");
+        stbuf->st_mode = S_IFDIR | 0755;
+        stbuf->st_nlink = target->sub_dir.size() + 2;
     }
-    std::shared_lock<std::shared_mutex> shared_create_file_lock(create_file_mutex);     // make sure nobody is creating new file at the same time
-    auto it = path_to_iNum.find(path_str);
-    if (it != path_to_iNum.end()){
-        INUM_TYPE iNum = it->second;
-        stbuf->st_size = mapping_table[iNum].logical_size_for_host;
+    else {
+        DEBUG_MESSAGE("  is file");
+        stbuf->st_mode = S_IFREG | 0644;
+        stbuf->st_nlink = 1;
+        //stbuf->st_size = target->fileSize;
     }
-    shared_create_file_lock.unlock();
-    return 0;
-}
-
-static int cdcfs_create(const char *path, mode_t mode, struct fuse_file_info *fi) {
-    int real_file_handler;
-    char full_path[1024];
-    snprintf(full_path, sizeof(full_path), "%s%s", BACKEND, path);
-    DEBUG_MESSAGE("[create]" << path);
-    
-    real_file_handler = creat(full_path, mode);
-    if (real_file_handler == -1) return -errno;
-    fi->fh = get_free_file_handler();
-    if (fi->fh == (FILE_HANDLER_INDEX_TYPE)-1) return -errno;
-
-    init_file_handler(path, fi->fh, real_file_handler, 'w');
     return 0;
 }
 
@@ -255,19 +241,6 @@ static int cdcfs_release(const char *path, struct fuse_file_info *fi) {
         return -errno;
     }
     release_file_handler(fi->fh);
-    return 0;
-}
-
-static int cdcfs_utime(const char *path, struct utimbuf *ubuf) {
-    int res;
-    char full_path[1024];
-    snprintf(full_path, sizeof(full_path), "%s%s", BACKEND, path);
-    DEBUG_MESSAGE("[utime]" << path);
-
-    res = utime(full_path, ubuf);
-    if (res == -1) {
-        return -errno;
-    }
     return 0;
 }
 
@@ -546,92 +519,4 @@ static int cdcfs_write(const char *path, const char *buf, size_t size, off_t off
         }
     }
     return size;
-}
-
-/*static int cdcfs_truncate(const char *path, off_t size) {
-    int res;
-    char full_path[1024];
-    snprintf(full_path, sizeof(full_path), "%s%s", BACKEND, path);
-    DEBUG_MESSAGE("[truncate]" << path << " size: " << size);
-
-    res = truncate(full_path, size);
-    if (res == -1) {
-        return -errno;
-    }
-    return 0;
-}*/
-
-static int cdcfs_ftruncate(const char *path, off_t size, fuse_file_info *fi) {
-    int res;
-    return 0;
-    DEBUG_MESSAGE("[ftruncate]" << path << ", size: " << size);
-
-    if  (fi == NULL) {
-        return -errno;
-    }
-
-    res = ftruncate(file_handler[fi->fh].fh, size);
-    if (res == -1) {
-        return -errno;
-    }
-    return 0;
-}
-
-/*static int cdcfs_unlink(const char *path) {
-    int res;
-    char full_path[1024];
-    snprintf(full_path, sizeof(full_path), "%s%s", BACKEND, path);
-    DEBUG_MESSAGE("unlink: " << path);
-    
-    res = unlink(full_path);
-    if (res == -1) {
-        return -errno;
-    }
-    return 0;
-}*/
-
-static int cdcfs_readlink(const char *path, char *buf, size_t size) {
-    int res;
-    char full_path[1024];
-    snprintf(full_path, sizeof(full_path), "%s%s", BACKEND, path);
-    DEBUG_MESSAGE("[readlink]" << full_path);
-
-    res = readlink(full_path, buf, size - 1);
-    if (res == -1) {
-        return -errno;
-    } 
-    else {
-        buf[res] = '\0';
-        return 0;
-    }
-}
-
-static int cdcfs_link(const char *oldpath, const char *newpath) {
-    int res;
-    char full_old[1024];
-    char full_new[1024];
-    snprintf(full_old, sizeof(full_old), "%s%s", BACKEND, oldpath);
-    snprintf(full_new, sizeof(full_new), "%s%s", BACKEND, newpath);
-    DEBUG_MESSAGE("[link]" << "dest: " << full_new << " src: " << full_old);
-    
-    res = link(full_old, full_new);
-    if (res == -1) {
-        return -errno;
-    }
-    return 0;
-}
-
-static int cdcfs_symlink(const char *oldpath, const char *newpath) {
-    int res;
-    char full_old[1024];
-    char full_new[1024];
-    snprintf(full_old, sizeof(full_old), "%s%s", BACKEND, oldpath);
-    snprintf(full_new, sizeof(full_new), "%s%s", BACKEND, newpath);
-    DEBUG_MESSAGE("[symlink]" << "dest" << full_new << " src: " << full_old);
-
-    res = symlink(full_old, full_new);
-    if (res == -1) {
-        return -errno;
-    }
-    return 0;
 }
