@@ -4,6 +4,7 @@
 #define DEF_H
 
 #define BACKEND "/home/johnnychang/CDCFS/bak"
+#define MAPPING_OUTPUT_PATH "/home/johnnychang/result/mapping.txt"
 #define MAX_GROUP_SIZE 32768
 #define BLOCK_SIZE 4096
 
