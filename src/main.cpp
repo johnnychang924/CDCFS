@@ -9,20 +9,30 @@ static void cdcfs_leave(void *param){
     PRINT_MESSAGE("\n----------------------------------------leaving CDCFS !!!----------------------------------------");
     PRINT_MESSAGE("total write size:" << (float)total_write_size / 1000000000 << "GB");
     PRINT_MESSAGE("total dedup rate:" << (float)total_dedup_size / total_write_size * 100 << "%");
-    std::ofstream mapping_output(MAPPING_OUTPUT_PATH);
-    for (const auto &[file_path, iNum] : path_to_iNum) {
-        mapping_output << "file: " << file_path << std::endl;
-        mapping_table_entry *entry = &mapping_table[iNum];
-        for (uint64_t group_id = 0; group_id < (uint64_t)entry->group_pos.size(); group_id++) {
-            if (entry->group_pos[group_id]->iNum == iNum){
-                mapping_output << "noDedup: " << entry->group_pos[group_id]->start_byte << " " << entry->group_pos[group_id]->group_length << std::endl;
-            }
-            else{
-                mapping_output << "dedup: " << iNum_to_path[entry->group_pos[group_id]->iNum] << " "<< entry->group_pos[group_id]->start_byte  << " " << entry->group_pos[group_id]->group_length << std::endl;
+    // output the mapping table to a file
+    #ifdef MAPPING_OUTPUT_PATH
+        std::ofstream mapping_output(MAPPING_OUTPUT_PATH);
+        for (const auto &[file_path, iNum] : path_to_iNum) {
+            mapping_output << "file: " << file_path << std::endl;
+            mapping_table_entry *entry = &mapping_table[iNum];
+            for (uint64_t group_id = 0; group_id < (uint64_t)entry->group_pos.size(); group_id++) {
+                if (entry->group_pos[group_id]->iNum == iNum){
+                    mapping_output << "noDedup: " << entry->group_pos[group_id]->start_byte << " " << entry->group_pos[group_id]->group_length << std::endl;
+                }
+                else{
+                    mapping_output << "dedup: " << iNum_to_path[entry->group_pos[group_id]->iNum] << " "<< entry->group_pos[group_id]->start_byte  << " " << entry->group_pos[group_id]->group_length << std::endl;
+                }
             }
         }
-    }
-    mapping_output.close();
+        mapping_output.close();
+    #endif
+    // output the read request to a file
+    #ifdef READ_REQ_OUTPUT_PATH
+        std::ofstream read_req_output(READ_REQ_OUTPUT_PATH);
+        for (int idx = 0; idx < rd_req_count; idx++){
+            read_req_output << rd_req[idx].inum << " " << rd_req[idx].off << " " << rd_req[idx].size << std::endl;
+        }
+    #endif
 }
 
 static struct fuse_operations cdcfs_oper = {

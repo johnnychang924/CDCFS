@@ -271,12 +271,26 @@ static int cdcfs_utime(const char *path, struct utimbuf *ubuf) {
     return 0;
 }
 
+struct rd_req_type{
+    INUM_TYPE inum;
+    off_t off;
+    size_t size;
+};
+
+#ifdef READ_REQ_OUTPUT_PATH
+    static rd_req_type rd_req[MAX_REC_RD_REQ];
+    static int rd_req_count = 0;
+#endif
+
 static int cdcfs_read(const char *path, char *buf, size_t size, off_t offset, struct fuse_file_info *fi) {
     DEBUG_MESSAGE("[read]" << path << " offset: " << offset << " size: " << size);
     struct interval {off_t start; off_t end;};
 
     // find first block group index
     INUM_TYPE iNum = file_handler[fi->fh].iNum;
+    #ifdef READ_REQ_OUTPUT_PATH
+        rd_req[rd_req_count++] = {iNum, offset, size};
+    #endif
     uint32_t blk_num = offset / BLOCK_SIZE;
     unsigned long start_group_idx;
     if (blk_num < mapping_table[iNum].group_idx.size() && (uint32_t)mapping_table[iNum].group_idx[blk_num] < mapping_table[iNum].group_pos.size()){
